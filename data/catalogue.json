@@ -1,0 +1,74 @@
+[
+  {
+    "code": "ACS-R6-400",
+    "model": "ACS Drive",
+    "description": "Drive, frame R6, 400 V, rated 60 kW",
+    "frame": "R6",
+    "ratedKw": 60,
+    "voltage": 400,
+    "ipRating": "IP21",
+    "options": ["EMC filter", "Braking chopper"],
+    "dimensionsMm": { "w": 252, "h": 571, "d": 330 },
+    "model3d": { "lod0": "models/acs-r6/lod0.glb", "lod1": "models/acs-r6/lod1.glb", "lod2": "models/acs-r6/lod2.glb" }
+  },
+  {
+    "code": "ACS-R7-400",
+    "model": "ACS Drive",
+    "description": "Drive, frame R7, 400 V, rated 85 kW",
+    "frame": "R7",
+    "ratedKw": 85,
+    "voltage": 400,
+    "ipRating": "IP21",
+    "options": ["EMC filter", "Braking chopper"],
+    "dimensionsMm": { "w": 284, "h": 723, "d": 370 },
+    "model3d": { "lod0": "models/acs-r7/lod0.glb", "lod1": "models/acs-r7/lod1.glb", "lod2": "models/acs-r7/lod2.glb" }
+  },
+  {
+    "code": "ACS-R8-400",
+    "model": "ACS Drive",
+    "description": "Drive, frame R8, 400 V, rated 120 kW",
+    "frame": "R8",
+    "ratedKw": 120,
+    "voltage": 400,
+    "ipRating": "IP21",
+    "options": ["EMC filter", "Braking chopper", "du/dt filter"],
+    "dimensionsMm": { "w": 300, "h": 875, "d": 386 },
+    "model3d": { "lod0": "models/acs-r8/lod0.glb", "lod1": "models/acs-r8/lod1.glb", "lod2": "models/acs-r8/lod2.glb" }
+  },
+  {
+    "code": "ACS-R9-400",
+    "model": "ACS Drive",
+    "description": "Drive, frame R9, 400 V, rated 170 kW",
+    "frame": "R9",
+    "ratedKw": 170,
+    "voltage": 400,
+    "ipRating": "IP21",
+    "options": ["EMC filter", "du/dt filter"],
+    "dimensionsMm": { "w": 380, "h": 955, "d": 418 },
+    "model3d": { "lod0": "models/acs-r9/lod0.glb", "lod1": "models/acs-r9/lod1.glb", "lod2": "models/acs-r9/lod2.glb" }
+  },
+  {
+    "code": "CAB-STD-800",
+    "model": "Standard Cabinet",
+    "description": "Cabinet, 800 mm wide, IP54",
+    "frame": null,
+    "ratedKw": null,
+    "voltage": null,
+    "ipRating": "IP54",
+    "options": ["Cooling fan", "Door lock"],
+    "dimensionsMm": { "w": 800, "h": 2000, "d": 600 },
+    "model3d": { "lod0": "models/cab-800/lod0.glb", "lod1": "models/cab-800/lod1.glb", "lod2": "models/cab-800/lod2.glb" }
+  },
+  {
+    "code": "PNL-SAFETY-1",
+    "model": "Safety Panel",
+    "description": "Safety panel with emergency stop",
+    "frame": null,
+    "ratedKw": null,
+    "voltage": null,
+    "ipRating": "IP65",
+    "options": ["Emergency stop", "Status lamp"],
+    "dimensionsMm": { "w": 400, "h": 500, "d": 200 },
+    "model3d": { "lod0": "models/pnl-s1/lod0.glb", "lod1": "models/pnl-s1/lod1.glb", "lod2": "models/pnl-s1/lod2.glb" }
+  }
+]

@@ -1,0 +1,61 @@
+{
+  "projectId": "P-24117",
+  "name": "Water plant pump room",
+  "customerGroup": "OEM",
+  "items": [
+    {
+      "itemId": "itm-drv-03",
+      "label": "DRV-03",
+      "variantCode": "ACS-R7-400",
+      "quantity": 1,
+      "sizingInputs": { "motorKw": 75, "voltage": 400 },
+      "sizingSnapshot": { "variantCode": "ACS-R7-400", "frame": "R7", "loadPct": 88, "apiVersion": "v1", "sizedAt": "2026-10-17T14:02:00.000Z" },
+      "version": 1
+    },
+    {
+      "itemId": "itm-drv-04",
+      "label": "DRV-04",
+      "variantCode": "ACS-R6-400",
+      "quantity": 1,
+      "sizingInputs": { "motorKw": 45, "voltage": 400 },
+      "sizingSnapshot": { "variantCode": "ACS-R6-400", "frame": "R6", "loadPct": 75, "apiVersion": "v1", "sizedAt": "2026-10-17T14:02:00.000Z" },
+      "version": 1
+    },
+    {
+      "itemId": "itm-drv-05",
+      "label": "DRV-05",
+      "variantCode": "ACS-R7-400",
+      "quantity": 1,
+      "sizingInputs": { "motorKw": 70, "voltage": 400 },
+      "sizingSnapshot": null,
+      "version": 1
+    },
+    {
+      "itemId": "itm-cab-01",
+      "label": "CAB-01",
+      "variantCode": "CAB-STD-800",
+      "quantity": 1,
+      "sizingInputs": null,
+      "sizingSnapshot": null,
+      "version": 1
+    },
+    {
+      "itemId": "itm-cab-02",
+      "label": "CAB-02",
+      "variantCode": "CAB-STD-800",
+      "quantity": 1,
+      "sizingInputs": null,
+      "sizingSnapshot": null,
+      "version": 1
+    },
+    {
+      "itemId": "itm-pnl-s1",
+      "label": "PNL-S1",
+      "variantCode": "PNL-SAFETY-1",
+      "quantity": 1,
+      "sizingInputs": null,
+      "sizingSnapshot": null,
+      "version": 1
+    }
+  ]
+}
