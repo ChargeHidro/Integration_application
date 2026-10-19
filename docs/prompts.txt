@@ -40,11 +40,16 @@ just tell me did you update the folder structure according to the new claude.md
 Now write adapters
 
 === Prompt 10 ===
-Now repositries   and then modules
+Now repositries and then modules
 
 === Prompt 11 ===
 now write scripts
 
 === Prompt 12 ===
 add gitignore
+=== Prompt 13 ===
+There is no script for run mocks  add it
+
+=== Prompt 14 ===
+add entery points of application  src/app.ts and server.ts
 

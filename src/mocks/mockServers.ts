@@ -2,10 +2,6 @@ import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
-// Three mock enterprise systems. Each runs as its own HTTP server, so the service talks to
-// them over the network exactly as it would to the real ones. Behaviour is configurable
-// (and changeable at runtime) so tests can make them slow, flaky or down.
-
 export interface SizingMockOptions { minDelayMs: number; maxDelayMs: number; failRate: number; random: () => number }
 export interface PricingMockOptions { perSecond: number; down: boolean; delayMs: number }
 export interface CatalogueMockOptions { down: boolean; delayMs: number }
@@ -18,9 +14,8 @@ export interface Mocks {
   close(): Promise<void>;
 }
 
-const variants: any[] = JSON.parse(readFileSync(new URL("../../data/catalogue.json", import.meta.url), "utf8"));
+const variants: { code: string }[] = JSON.parse(readFileSync(new URL("../../data/catalogue.json", import.meta.url), "utf8"));
 
-// --- sizing rules: smallest frame that runs the motor at <= 90 % load -----------------
 const FRAMES = [
   { frame: "R6", ratedKw: 60 },
   { frame: "R7", ratedKw: 85 },
@@ -28,7 +23,6 @@ const FRAMES = [
   { frame: "R9", ratedKw: 170 },
 ];
 
-// --- prices: base price per variant x country factor ----------------------------------
 const BASE_EUR: Record<string, number> = {
   "ACS-R6-400": 6200, "ACS-R7-400": 8400, "ACS-R8-400": 11900, "ACS-R9-400": 16800,
   "CAB-STD-800": 2400, "PNL-SAFETY-1": 950,
@@ -63,15 +57,15 @@ export async function startMocks(opts: {
 
   const sizingServer = serve(async (req, res) => {
     sizing.requests++;
-    if (req.method !== "POST" || req.url !== "/v1/size") return send(res, 404, { error: "not found" });
+    if (req.method !== "POST" || req.url !== "/size") return send(res, 404, { error: "not found" });
     const body = JSON.parse(await readBody(req) || "{}");
     await wait(sizing.minDelayMs + sizing.random() * (sizing.maxDelayMs - sizing.minDelayMs));
-    if (sizing.random() < sizing.failRate) return send(res, 500, { error: "sizing engine error" });
+    if (sizing.random() < sizing.failRate) return send(res, 503, { error: "sizing engine error" });
     if (typeof body.motorKw !== "number" || body.motorKw <= 0) return send(res, 400, { error: "motorKw required" });
     const pick = FRAMES.find((f) => body.motorKw <= f.ratedKw * 0.9);
     if (!pick) return send(res, 422, { error: "no frame large enough" });
     return send(res, 200, {
-      recommendedVariant: `ACS-${pick.frame}-${body.voltage ?? 400}`,
+      variantCode: `ACS-${pick.frame}-${body.voltage ?? 400}`,
       frame: pick.frame,
       loadPct: Math.round((body.motorKw / pick.ratedKw) * 100),
     });
@@ -102,7 +96,7 @@ export async function startMocks(opts: {
       variantCode: code,
       country: url.searchParams.get("country"),
       currency: country.currency,
-      unitPrice: Math.round(BASE_EUR[code]! * country.factor * discount * 100) / 100,
+      price: Math.round(BASE_EUR[code]! * country.factor * discount * 100) / 100,
       leadTimeDays: LEAD_TIME_DAYS[code],
       quotedAt: quotedAt.toISOString(),
       validUntil: new Date(quotedAt.getTime() + 24 * 3600 * 1000).toISOString(),

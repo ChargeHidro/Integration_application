@@ -11,7 +11,10 @@
     "typecheck": "tsc --noEmit",
     "db:migrate": "tsx --env-file=.env src/db/migrate.ts",
     "db:seed": "tsx --env-file=.env src/db/seed.ts",
-    "token": "tsx --env-file=.env scripts/make-token.ts"
+    "token": "tsx --env-file=.env scripts/make-token.ts",
+    "mocks": "tsx --env-file=.env src/mocks/run.ts",
+    "dev": "tsx watch --env-file=.env src/server.ts",
+    "start": "tsx --env-file=.env src/server.ts"
   },
   "dependencies": {
     "express": "^4.22.3",
