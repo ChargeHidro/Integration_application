@@ -36,6 +36,14 @@ describe("TtlCache", () => {
     await expect(cache.get("k")).resolves.toBeNull();
   });
 
+  it("keeps the original fetch time when refilled from another store", async () => {
+    await cache.set("k", { price: 10 }, { fetchedAt: new Date(now - 590_000) });
+
+    expect(await cache.get("k")).toMatchObject({ fetchedAt: new Date(now - 590_000).toISOString(), fresh: true });
+    now += 10_000;
+    expect((await cache.get("k"))?.fresh).toBe(false);
+  });
+
   it("never serves an entry past notAfter", async () => {
     await cache.set("k", { price: 10 }, { notAfter: new Date(now + 120_000) });
     now += 120_000;

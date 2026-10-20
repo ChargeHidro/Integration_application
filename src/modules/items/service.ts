@@ -45,7 +45,7 @@ export class ResizeService {
     if (!resizableKinds.has(item.kind)) throw new ValidationError(`Item ${itemId} is a ${item.kind} and cannot be re-sized`);
 
     const sizing = await this.deps.adapters.sizing.fetch(input, { timeoutMs: this.deps.settings.sizingTimeoutMs });
-    if (sizing.data === null) {
+    if (sizing.status !== "ok") {
       throw new ServiceUnavailableError("Sizing is unavailable right now; the item was not changed");
     }
 

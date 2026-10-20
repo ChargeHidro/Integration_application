@@ -91,9 +91,10 @@ export class TtlCache<T> {
     };
   }
 
-  async set(key: string, value: T, options: { notAfter?: Date } = {}): Promise<void> {
+  async set(key: string, value: T, options: { notAfter?: Date; fetchedAt?: Date } = {}): Promise<void> {
     const now = this.now();
     const notAfter = options.notAfter?.getTime();
+    const fetchedAt = options.fetchedAt?.getTime() ?? now;
 
     let ttlSeconds = this.options.retentionSeconds;
     if (notAfter !== undefined) {
@@ -102,7 +103,7 @@ export class TtlCache<T> {
       ttlSeconds = Math.min(ttlSeconds, remainingSeconds);
     }
 
-    const envelope: Envelope<T> = { value, fetchedAt: now, ...(notAfter === undefined ? {} : { notAfter }) };
+    const envelope: Envelope<T> = { value, fetchedAt, ...(notAfter === undefined ? {} : { notAfter }) };
     try {
       await this.store.set(this.keyOf(key), JSON.stringify(envelope), ttlSeconds);
     } catch (error) {

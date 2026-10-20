@@ -1,16 +1,24 @@
+import type { CatalogueQuery, CatalogueVariant } from "../../adapters/catalogue/schema";
+import type { PriceQuery, PriceQuote } from "../../adapters/pricing/schema";
+import type { SizingResult } from "../../adapters/sizing/schema";
 import { ConflictError, NotFoundError } from "../../core/errors/errors";
 import { withTransaction, type Pool } from "../../db/pool";
 import type {
   BomLine,
   BomRepository,
+  CatalogueVariantRepository,
   Item,
   ItemRepository,
   MotorInput,
   Position,
+  PriceSnapshotRepository,
   Project,
   Repositories,
   ResizeChange,
   ResizeOutcome,
+  SizingKey,
+  SizingResultRepository,
+  Stored,
 } from "../types";
 
 interface ItemRow {
@@ -61,7 +69,13 @@ function toBomLine(row: BomLineRow): BomLine {
 }
 
 export function createPostgresRepositories(pool: Pool): Repositories {
-  return { items: new PostgresItemRepository(pool), bom: new PostgresBomRepository(pool) };
+  return {
+    items: new PostgresItemRepository(pool),
+    bom: new PostgresBomRepository(pool),
+    catalogueVariants: new PostgresCatalogueVariantRepository(pool),
+    sizingResults: new PostgresSizingResultRepository(pool),
+    priceSnapshots: new PostgresPriceSnapshotRepository(pool),
+  };
 }
 
 class PostgresItemRepository implements ItemRepository {
@@ -124,5 +138,117 @@ class PostgresBomRepository implements BomRepository {
       [projectId],
     );
     return rows.map(toBomLine);
+  }
+}
+
+interface JsonSnapshotRow<T> {
+  data: T;
+  fetched_at: Date;
+}
+
+class PostgresCatalogueVariantRepository implements CatalogueVariantRepository {
+  constructor(private readonly pool: Pool) {}
+
+  async get(query: CatalogueQuery): Promise<Stored<CatalogueVariant> | null> {
+    const { rows } = await this.pool.query<JsonSnapshotRow<CatalogueVariant>>(
+      "SELECT data, fetched_at FROM catalogue_variants WHERE variant_code = $1",
+      [query.variantCode],
+    );
+    return rows[0] ? { value: rows[0].data, fetchedAt: rows[0].fetched_at.toISOString() } : null;
+  }
+
+  async put(query: CatalogueQuery, value: CatalogueVariant, fetchedAt: string): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO catalogue_variants (variant_code, data, fetched_at) VALUES ($1, $2, $3)
+       ON CONFLICT (variant_code) DO UPDATE SET data = EXCLUDED.data, fetched_at = EXCLUDED.fetched_at
+       WHERE catalogue_variants.fetched_at <= EXCLUDED.fetched_at`,
+      [query.variantCode, JSON.stringify(value), fetchedAt],
+    );
+  }
+}
+
+class PostgresSizingResultRepository implements SizingResultRepository {
+  constructor(private readonly pool: Pool) {}
+
+  async get(key: SizingKey): Promise<Stored<SizingResult> | null> {
+    const { rows } = await this.pool.query<JsonSnapshotRow<SizingResult>>(
+      "SELECT data, fetched_at FROM sizing_results WHERE input_hash = $1 AND api_version = $2",
+      [key.inputHash, key.apiVersion],
+    );
+    return rows[0] ? { value: rows[0].data, fetchedAt: rows[0].fetched_at.toISOString() } : null;
+  }
+
+  async put(key: SizingKey, value: SizingResult, fetchedAt: string): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO sizing_results (input_hash, api_version, variant_code, load_pct, data, fetched_at)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (input_hash, api_version) DO UPDATE SET
+         variant_code = EXCLUDED.variant_code,
+         load_pct = EXCLUDED.load_pct,
+         data = EXCLUDED.data,
+         fetched_at = EXCLUDED.fetched_at
+       WHERE sizing_results.fetched_at <= EXCLUDED.fetched_at`,
+      [key.inputHash, key.apiVersion, value.variantCode, value.loadPct, JSON.stringify(value), fetchedAt],
+    );
+  }
+}
+
+interface PriceSnapshotRow {
+  variant_code: string;
+  country: string;
+  currency: string;
+  amount: string;
+  lead_time_days: number;
+  valid_until: Date;
+  fetched_at: Date;
+}
+
+class PostgresPriceSnapshotRepository implements PriceSnapshotRepository {
+  constructor(private readonly pool: Pool) {}
+
+  async get(query: PriceQuery): Promise<Stored<PriceQuote> | null> {
+    const { rows } = await this.pool.query<PriceSnapshotRow>(
+      `SELECT variant_code, country, currency, amount, lead_time_days, valid_until, fetched_at
+       FROM price_snapshots WHERE variant_code = $1 AND country = $2 AND customer_group = $3`,
+      [query.variantCode, query.country, query.customerGroup],
+    );
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      value: {
+        variantCode: row.variant_code,
+        country: row.country,
+        currency: row.currency,
+        price: Number(row.amount),
+        leadTimeDays: row.lead_time_days,
+        validUntil: row.valid_until.toISOString(),
+      },
+      fetchedAt: row.fetched_at.toISOString(),
+    };
+  }
+
+  async put(query: PriceQuery, value: PriceQuote, fetchedAt: string): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO price_snapshots
+         (variant_code, country, customer_group, amount, currency, lead_time_days, valid_until, fetched_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (variant_code, country, customer_group) DO UPDATE SET
+         amount = EXCLUDED.amount,
+         currency = EXCLUDED.currency,
+         lead_time_days = EXCLUDED.lead_time_days,
+         valid_until = EXCLUDED.valid_until,
+         fetched_at = EXCLUDED.fetched_at
+       WHERE price_snapshots.fetched_at <= EXCLUDED.fetched_at`,
+      [
+        query.variantCode,
+        query.country,
+        query.customerGroup,
+        value.price,
+        value.currency,
+        value.leadTimeDays,
+        value.validUntil,
+        fetchedAt,
+      ],
+    );
   }
 }

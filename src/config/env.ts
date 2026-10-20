@@ -2,6 +2,7 @@ import { z } from "zod";
 
 const port = z.coerce.number().int().min(1).max(65535);
 const positiveInt = z.coerce.number().int().positive();
+const positiveNumber = z.coerce.number().positive();
 const nonNegativeInt = z.coerce.number().int().min(0);
 const ratio = z.coerce.number().min(0).max(1);
 
@@ -20,18 +21,19 @@ const envSchema = z.object({
   SIZING_URL: z.string().url().default("http://localhost:4001"),
   CATALOGUE_URL: z.string().url().default("http://localhost:4002"),
   PRICING_URL: z.string().url().default("http://localhost:4003"),
+  SIZING_API_VERSION: z.string().min(1).max(32).default("v1"),
 
   SIDEBAR_BUDGET_MS: positiveInt.default(1000),
   SECTION_TIMEOUT_MS: positiveInt.default(800),
   RESIZE_TIMEOUT_MS: positiveInt.default(5000),
 
   CATALOGUE_TTL_SECONDS: positiveInt.default(3600),
-  SIZING_TTL_SECONDS: positiveInt.default(900),
-  PRICING_TTL_SECONDS: positiveInt.default(600),
-  STALE_RETENTION_SECONDS: positiveInt.default(86400),
+  SIZING_TTL_SECONDS: positiveInt.default(604800),
+  PRICING_TTL_SECONDS: positiveInt.default(86400),
+  STALE_RETENTION_SECONDS: positiveInt.default(1209600),
 
-  SIZING_RATE_LIMIT_PER_SECOND: positiveInt.default(20),
-  PRICING_RATE_LIMIT_PER_SECOND: positiveInt.default(5),
+  SIZING_RATE_LIMIT_PER_SECOND: positiveNumber.default(18),
+  PRICING_RATE_LIMIT_PER_SECOND: positiveNumber.default(4.5),
 
   RETRY_MAX_RETRIES: nonNegativeInt.max(5).default(2),
   RETRY_BASE_DELAY_MS: positiveInt.default(100),
@@ -57,6 +59,7 @@ export interface SystemConfig {
   url: string;
   ttlSeconds: number;
   rateLimitPerSecond?: number;
+  apiVersion?: string;
 }
 
 export interface Config {
@@ -114,7 +117,12 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
     redisUrl: e.REDIS_URL,
     auth: { secret: e.JWT_SECRET, issuer: e.JWT_ISSUER, audience: e.JWT_AUDIENCE },
     systems: {
-      sizing: { url: e.SIZING_URL, ttlSeconds: e.SIZING_TTL_SECONDS, rateLimitPerSecond: e.SIZING_RATE_LIMIT_PER_SECOND },
+      sizing: {
+        url: e.SIZING_URL,
+        ttlSeconds: e.SIZING_TTL_SECONDS,
+        rateLimitPerSecond: e.SIZING_RATE_LIMIT_PER_SECOND,
+        apiVersion: e.SIZING_API_VERSION,
+      },
       catalogue: { url: e.CATALOGUE_URL, ttlSeconds: e.CATALOGUE_TTL_SECONDS },
       pricing: { url: e.PRICING_URL, ttlSeconds: e.PRICING_TTL_SECONDS, rateLimitPerSecond: e.PRICING_RATE_LIMIT_PER_SECOND },
     },

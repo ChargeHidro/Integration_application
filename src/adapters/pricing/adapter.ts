@@ -4,7 +4,7 @@ import type { Adapter, FetchOptions, SectionResult } from "../types";
 import type { PricingClient } from "./client";
 import { priceQuoteSchema, type PriceQuery, type PriceQuote } from "./schema";
 
-export type PricingAdapterDeps = Omit<ResilienceDeps<PriceQuote>, "system"> & {
+export type PricingAdapterDeps = Omit<ResilienceDeps, "system"> & {
   client: PricingClient;
   now?: () => number;
 };
@@ -18,11 +18,9 @@ export class PricingAdapter implements Adapter<PriceQuery, PriceQuote> {
     const result = await resilientFetch(
       { ...this.deps, system: this.system },
       {
-        cacheKey: `${query.variantCode}:${query.country}:${query.customerGroup}`,
         timeoutMs: options.timeoutMs,
         call: async (signal) =>
           parseVendorResponse(this.system, priceQuoteSchema, await this.deps.client.getPrice(query, signal)),
-        notAfter: (quote) => new Date(quote.validUntil),
       },
     );
 

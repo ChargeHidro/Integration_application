@@ -4,7 +4,7 @@ Guidance for Claude (and any AI assistant) working in this repository.
 
 > **Confidentiality:** This project is a hiring assessment. Do not copy the original assessment PDF or large parts of its wording into the repo. If the repo is public, keep this file free of anything beyond what is needed to build the service.
 
-> **Scope:** This is a **lean build** of the architecture in the design document. Build the required core first. Anything marked *optional* is done only after the core is complete and all tests pass. Everything else (queues, workers, outbox, webhooks, catalogue sync, LLM) lives in the design document, not in code.
+> **Scope:** This is a **lean build** of the architecture in the design document ([docs/architecture.pdf](docs/architecture.pdf)). Build the required core first. Anything marked *optional* is done only after the core is complete and all tests pass. Everything else (queues, workers, outbox, webhooks, catalogue sync, AI assistant and LLM) lives in the design document, not in code.
 
 ---
 
@@ -24,10 +24,11 @@ Only the **backend** is built here. The enterprise systems are **mocked**. The R
 2. **Every sidebar section has a status.** One failing system must never blank the whole sidebar.
 3. **The sidebar responds within 1 s**, even when systems are slow or down.
 4. **An item's identity (`item_id`) never changes**, including after a re-size. Variant, model reference, BOM line and price hang off it.
-5. **Respect external rate limits:** sizing 20 req/s, pricing 5 req/s (whole service). Limits are global, so counters live in Redis, not in process memory.
+5. **Respect external rate limits:** the vendors allow sizing 20 req/s and pricing 5 req/s for the whole service. We run at **18 req/s and 4.5 req/s** to keep a safety margin. Limits are global, so counters live in Redis, not in process memory.
 6. **Adapters are isolated.** Modules never call an enterprise system directly; they go through its adapter.
-7. **Small, correct and tested beats wide and fragile.**
-8. **Code must run on the first try from the README.**
+7. **Read order: Redis → PostgreSQL → adapter.** An external system is called only when neither Redis nor PostgreSQL has usable data, and its result is written back to both (see §9).
+8. **Small, correct and tested beats wide and fragile.**
+9. **Code must run on the first try from the README.**
 
 ---
 
@@ -60,17 +61,19 @@ Browser (React, untrusted)
 Integration API (Express)
    ├─ core/auth          verify JWT, build caller context (role, country, customerGroup)
    ├─ core/entitlements  single place for "may this caller see X?"
-   ├─ core/resilience    cache, retry, circuit breaker, rate limiter, timeout
+   ├─ core/resilience    read-through (Redis → Postgres → adapter), retry, circuit breaker, rate limiter, timeout
    ├─ modules/*          sidebar, items (resize), projects (BOM)
-   └─ adapters/*         one per system, built on core/resilience
+   └─ adapters/*         one per system: rate limit, retry, breaker, timeout, schema check
           │
           ├─ Sizing mock     (slow, 20% failures)
           ├─ Catalogue mock  (static JSON)
           └─ Pricing mock    (rate-limited, prices by country)
 
-PostgreSQL: projects, items, BOM lines, price snapshots
+PostgreSQL: projects, items, BOM lines, catalogue variants, sizing results, price snapshots
 Redis:      cache entries, rate-limit counters
 ```
+
+The full design (diagram, flows, technology choices, sequences, assumptions) is in [docs/architecture.pdf](docs/architecture.pdf); the editable diagram is [docs/architecture (2).drawio](docs/architecture%20(2).drawio).
 
 **Built here vs. design document only**
 
@@ -104,7 +107,7 @@ Redis:      cache entries, rate-limit counters
 │   ├── core/
 │   │   ├── auth/               # JWT verify middleware, caller context
 │   │   ├── entitlements/       # canSeePrice(caller)
-│   │   ├── resilience/         # cache.ts, retry.ts, circuitBreaker.ts, rateLimiter.ts, withTimeout.ts
+│   │   ├── resilience/         # cache.ts, readThrough.ts, retry.ts, circuitBreaker.ts, rateLimiter.ts, withTimeout.ts
 │   │   ├── errors/             # typed errors + Express error handler
 │   │   ├── http/               # request ID, logging middleware
 │   │   └── logger.ts
@@ -113,12 +116,14 @@ Redis:      cache entries, rate-limit counters
 │   │   ├── sizing/             # client.ts, adapter.ts, schema.ts
 │   │   ├── catalogue/
 │   │   └── pricing/
+│   ├── sources/
+│   │   └── createSources.ts    # wraps each adapter in the read order (Redis → PostgreSQL → adapter)
 │   ├── modules/
 │   │   ├── sidebar/            # route, service (fan-out + statuses)
 │   │   ├── items/              # resize route, service
 │   │   └── projects/           # BOM route, service
 │   ├── repositories/
-│   │   ├── types.ts            # ItemRepository, BomRepository interfaces
+│   │   ├── types.ts            # Item, Bom, CatalogueVariant, SizingResult, PriceSnapshot repository interfaces
 │   │   ├── postgres/           # pg implementations
 │   │   └── memory/             # in-memory implementations (tests, fallback)
 │   ├── db/
@@ -126,10 +131,11 @@ Redis:      cache entries, rate-limit counters
 │   │   ├── migrations/         # plain SQL, numbered
 │   │   └── seed.ts             # sample project with placed items
 │   └── mocks/                  # mock enterprise systems (separate Express apps / ports)
-│       ├── sizing/server.ts
-│       ├── catalogue/server.ts
-│       ├── catalogue/catalogue.json
-│       └── pricing/server.ts
+│       ├── mockServers.ts      # sizing, catalogue and pricing mock apps
+│       └── run.ts              # starts all three mocks
+├── data/
+│   ├── catalogue.json          # served by the catalogue mock
+│   └── project.json            # reference project data (the seed uses src/db/sampleProject.ts)
 ├── scripts/
 │   └── make-token.ts           # signs local mock JWTs for each role
 └── tests/
@@ -139,6 +145,7 @@ Redis:      cache entries, rate-limit counters
 
 **Module rules**
 - `modules/*` may import from `core/*`, `adapters/*` and `repositories/types`. Never from another module's internals.
+- `sources/*` is wiring only: it combines adapters, Redis and repositories through `core/resilience/readThrough`. It is built in `server.ts` and passed to `createApp` as `sources`.
 - `adapters/*` never import from `modules/*`.
 - Entitlement checks happen in `core/entitlements`, called by the service layer before data leaves the API.
 - Services depend on repository **interfaces**; `REPOSITORY=postgres|memory` in env selects the implementation. Postgres is the default; memory keeps tests fast and is a fallback if Docker is unavailable.
@@ -185,11 +192,11 @@ Section status values (core):
 | `unavailable` | System failed and no cached data exists |
 | `not_permitted` | Caller is not entitled to this section |
 
-Sizing in the core is a **direct call with a timeout**: fresh result → `ok`; timeout or failure → cached result as `stale`, else `unavailable`.
+Every section follows the read order in §9. Sizing in the core is a **direct call with a timeout** on a miss: fresh result → `ok`; timeout, failure or open circuit → last Redis or PostgreSQL result as `stale`, else `unavailable`.
 
 ### `POST /items/:itemId/resize`
-Body: motor/load data.
-1. Call sizing through the adapter (with retries; the user is waiting on this action, so allow up to about 5 s here, not the 1 s sidebar budget).
+Body: motor/load data, for example `{ "motorKw": 90, "voltage": 400 }`.
+1. Get the sizing result through the read order (Redis → PostgreSQL → adapter). On a miss, call sizing through the adapter with retries; the user is waiting on this action, so allow up to about 5 s here, not the 1 s sidebar budget.
 2. If the recommended variant **changed**: in **one Postgres transaction**, update the item's `variant_code` and `model_ref`, update its BOM line, bump `version`.
 3. Return the BOM change:
 
@@ -203,8 +210,8 @@ Body: motor/load data.
 }
 ```
 
-- Variant unchanged → `changed: false`, no write.
-- Sizing unavailable or circuit open → `503` with a clear message; the item is not changed.
+- Variant unchanged → `changed: false`, no item or BOM write (the sizing result is still stored).
+- No stored result and sizing unavailable or circuit open → `503` with a clear message; the item is not changed. A re-size is never applied from a `stale` sizing result.
 
 ### `GET /projects/:projectId/bom`
 All items with quantities and prices. Prices are **filtered by the caller's entitlement**: a channel partner gets lines with **no price fields at all** and a `pricing: "not_permitted"` marker. Prices use the caller's **country**.
@@ -224,17 +231,31 @@ All items with quantities and prices. Prices are **filtered by the caller's enti
 
 ## 9. Caching, retries, circuit breaker, rate limits
 
-| System | Cache key | TTL | Notes |
-|---|---|---|---|
-| Catalogue | `cat:{variantCode}` | 1 h | Changes rarely |
-| Sizing | `size:{hash(inputs)}` | 15 min | Same inputs → same result |
-| Pricing | `price:{variant}:{country}:{group}` | 10 min | Never serve past the quote's `validUntil` (24 h) |
+### Read order (every system, every read)
 
-- TTLs live in config, one explicit value per system.
-- Cache entries store `fetchedAt`. Keep the raw entry longer than its freshness TTL so it can still be served as `stale` during an outage.
+```
+1. Redis cache          fresh hit → return ok
+2. PostgreSQL           fresh row → return ok, refill Redis
+3. Adapter → external   success → write PostgreSQL + Redis → return ok
+                        failure → newest Redis/PostgreSQL value as stale, else unavailable
+```
+
+- `core/resilience/readThrough.ts` implements this order once. `src/sources/createSources.ts` wraps each adapter with it (Redis key, PostgreSQL repository, freshness rule), and services call these sources. Adapters do one thing: call their external system with rate limit, retry, breaker, timeout and schema check. Adapters never touch Redis or PostgreSQL for data.
+- PostgreSQL reads and writes in the read order are bounded (about 200 ms), and their time is taken out of the adapter's timeout, so a slow database cannot break the 1 s sidebar budget.
+- The **entitlement check runs before step 1.** A caller who may not see prices never reads the price cache, the price table or the pricing adapter.
+- A write-back failure (Redis or PostgreSQL down) is logged and does not fail the request.
+
+| System | Redis key | PostgreSQL table | Fresh for | Notes |
+|---|---|---|---|---|
+| Catalogue | `cat:{variantCode}` | `catalogue_variants` | 1 h | Changes rarely. In production the table is filled by catalogue sync (design only); here it is filled on a miss. |
+| Sizing | `size:{hash(inputs, apiVersion)}` | `sizing_results` | 7 days | Same inputs and API version → same result, shared by all users. |
+| Pricing | `price:{variant}:{country}:{group}` | `price_snapshots` | Until the quote's `validUntil` (24 h) | Never served after `validUntil`, not even as `stale`. |
+
+- Freshness values live in config, one explicit value per system.
+- Redis entries and PostgreSQL rows store `fetchedAt`. Keep the raw Redis entry longer than its freshness so it can still be served as `stale` during an outage; PostgreSQL rows are kept until replaced.
 - **Retries:** up to 2, exponential backoff with jitter, only on timeouts, 5xx and 429 (respect `Retry-After`). Never retry 4xx validation errors. Retries must fit inside the caller's time budget.
 - **Circuit breaker (sizing):** opens when the failure rate exceeds a threshold over a rolling window, half-opens after a cool-down, closes after a successful probe. While open, the sizing mock is not called.
-- **Rate limiters:** Redis-backed token buckets for sizing (20/s) and pricing (5/s), values from config so they can be changed live (for example, pricing to 1/s).
+- **Rate limiters:** Redis-backed token buckets for sizing (18/s) and pricing (4.5/s), below the vendor limits of 20/s and 5/s. Values come from config (decimals allowed) so they can be changed live, for example pricing to 1/s.
 
 ---
 
@@ -246,8 +267,14 @@ items           (item_id PK, project_id FK, kind, variant_code, model_ref,
                  position jsonb, motor_input jsonb, version, updated_at)
 bom_lines       (bom_line_id PK, project_id FK, item_id FK UNIQUE, variant_code, quantity)
 price_snapshots (variant_code, country, customer_group, amount, currency,
-                 lead_time_days, valid_until, PK(variant_code, country, customer_group))
+                 lead_time_days, valid_until, fetched_at,
+                 PK(variant_code, country, customer_group))
+catalogue_variants (variant_code PK, data jsonb, fetched_at)
+sizing_results     (input_hash, api_version, variant_code, load_pct, data jsonb, fetched_at,
+                    PK(input_hash, api_version))
 ```
+
+Indexes follow the queries: primary keys, `items(project_id)`, `bom_lines(item_id)` UNIQUE, `bom_lines(project_id)`. The extra indexes listed in the design document belong to design-only tables.
 
 The host application is the real source of truth for projects; Postgres holds the working copy. Write-back to the host (outbox) is design-document only.
 
@@ -264,7 +291,7 @@ npm run mocks                 # starts sizing, catalogue, pricing mocks
 npm run dev                   # Integration API
 npm run token -- sales_engineer IN   # print a mock JWT
 npm test                      # uses in-memory repositories and injected mock behaviour
-npm run lint && npm run typecheck
+npm run typecheck
 ```
 
 Keep `README.md` in sync with these scripts.
@@ -278,7 +305,8 @@ Keep `README.md` in sync with these scripts.
 3. **Rate limit:** pricing 429 → retried with backoff, or the section degrades to `stale`/`unavailable`.
 4. **Entitlements:** sales engineer sees prices in sidebar and BOM; channel partner gets `not_permitted` and **no price fields anywhere in the JSON**.
 5. **Token checks:** expired, wrong issuer, wrong audience or bad signature → 401.
-6. **Re-size:** variant changes → item, model reference and BOM line updated together, BOM change returned; variant unchanged → no write; sizing down → 503 and nothing changed.
+6. **Re-size:** variant changes → item, model reference and BOM line updated together, BOM change returned; variant unchanged → no item or BOM write; sizing down with no stored result → 503 and nothing changed.
+7. **Read order:** Redis hit → neither PostgreSQL nor the adapter is called; Redis miss + PostgreSQL hit → adapter not called and Redis refilled; both miss → adapter called and the result written to both; adapter fails → newest stored value returned as `stale`; an expired price quote is never returned.
 
 Tests inject the mocks' delay and failure rate; no flaky timing.
 
@@ -313,6 +341,7 @@ Tests inject the mocks' delay and failure rate; no flaky timing.
 - Never log tokens, or prices for unentitled users.
 - Every log line carries a request ID.
 - Keep Express handlers thin (parse → service → respond); logic lives in services.
+- No comments in code; names and small functions carry the meaning.
 - Do not add new infrastructure (queues, Kafka, Elasticsearch, extra services) in the core. Fewer moving parts is a goal.
 
 ---

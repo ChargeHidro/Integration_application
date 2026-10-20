@@ -2,20 +2,14 @@ import { pino } from "pino";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { CatalogueAdapter } from "../../src/adapters/catalogue/adapter";
 import { HttpCatalogueClient } from "../../src/adapters/catalogue/client";
-import type { CatalogueVariant } from "../../src/adapters/catalogue/schema";
 import { PricingAdapter } from "../../src/adapters/pricing/adapter";
 import { HttpPricingClient } from "../../src/adapters/pricing/client";
-import type { PriceQuote } from "../../src/adapters/pricing/schema";
 import { SizingAdapter } from "../../src/adapters/sizing/adapter";
 import { HttpSizingClient } from "../../src/adapters/sizing/client";
-import type { SizingResult } from "../../src/adapters/sizing/schema";
-import { MemoryCacheStore, TtlCache } from "../../src/core/resilience/cache";
 import { startMocks, type Mocks } from "../../src/mocks/mockServers";
 
 const logger = pino({ level: "silent" });
 const retry = { maxRetries: 0, baseDelayMs: 1, maxDelayMs: 1 };
-const cache = <T>(namespace: string) =>
-  new TtlCache<T>(new MemoryCacheStore(), { namespace, ttlSeconds: 60, retentionSeconds: 3600 });
 
 let mocks: Mocks;
 
@@ -29,7 +23,7 @@ afterAll(async () => {
 
 describe("mocks speak the adapter contract", () => {
   it("sizing", async () => {
-    const adapter = new SizingAdapter({ client: new HttpSizingClient(mocks.urls.sizing), cache: cache<SizingResult>("size"), retry, logger });
+    const adapter = new SizingAdapter({ client: new HttpSizingClient(mocks.urls.sizing), retry, logger });
 
     const result = await adapter.fetch({ motorKw: 70, voltage: 400 }, { timeoutMs: 1000 });
 
@@ -38,7 +32,7 @@ describe("mocks speak the adapter contract", () => {
 
   it("sizing failure is a retryable 503", async () => {
     mocks.sizing.failRate = 1;
-    const adapter = new SizingAdapter({ client: new HttpSizingClient(mocks.urls.sizing), cache: cache<SizingResult>("size"), retry, logger });
+    const adapter = new SizingAdapter({ client: new HttpSizingClient(mocks.urls.sizing), retry, logger });
 
     const result = await adapter.fetch({ motorKw: 70, voltage: 400 }, { timeoutMs: 1000 });
 
@@ -47,7 +41,7 @@ describe("mocks speak the adapter contract", () => {
   });
 
   it("catalogue", async () => {
-    const adapter = new CatalogueAdapter({ client: new HttpCatalogueClient(mocks.urls.catalogue), cache: cache<CatalogueVariant>("cat"), retry, logger });
+    const adapter = new CatalogueAdapter({ client: new HttpCatalogueClient(mocks.urls.catalogue), retry, logger });
 
     const result = await adapter.fetch({ variantCode: "ACS-R7-400" }, { timeoutMs: 1000 });
 
@@ -55,7 +49,7 @@ describe("mocks speak the adapter contract", () => {
   });
 
   it("pricing", async () => {
-    const adapter = new PricingAdapter({ client: new HttpPricingClient(mocks.urls.pricing), cache: cache<PriceQuote>("price"), retry, logger });
+    const adapter = new PricingAdapter({ client: new HttpPricingClient(mocks.urls.pricing), retry, logger });
 
     const result = await adapter.fetch({ variantCode: "ACS-R6-400", country: "DE", customerGroup: "OEM" }, { timeoutMs: 1000 });
 
@@ -63,7 +57,7 @@ describe("mocks speak the adapter contract", () => {
   });
 
   it("pricing rate limit surfaces as rate_limited", async () => {
-    const adapter = new PricingAdapter({ client: new HttpPricingClient(mocks.urls.pricing), cache: cache<PriceQuote>("price"), retry, logger });
+    const adapter = new PricingAdapter({ client: new HttpPricingClient(mocks.urls.pricing), retry, logger });
     const countries = ["IN", "DE", "US", "GB"];
 
     const results = await Promise.all(

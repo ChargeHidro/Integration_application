@@ -4,7 +4,7 @@ import type { Adapter, FetchOptions, SectionResult } from "../types";
 import type { CatalogueClient } from "./client";
 import { catalogueVariantSchema, type CatalogueQuery, type CatalogueVariant } from "./schema";
 
-export type CatalogueAdapterDeps = Omit<ResilienceDeps<CatalogueVariant>, "system"> & { client: CatalogueClient };
+export type CatalogueAdapterDeps = Omit<ResilienceDeps, "system"> & { client: CatalogueClient };
 
 export class CatalogueAdapter implements Adapter<CatalogueQuery, CatalogueVariant> {
   readonly system = "catalogue";
@@ -15,7 +15,6 @@ export class CatalogueAdapter implements Adapter<CatalogueQuery, CatalogueVarian
     return resilientFetch(
       { ...this.deps, system: this.system },
       {
-        cacheKey: query.variantCode,
         timeoutMs: options.timeoutMs,
         call: async (signal) =>
           parseVendorResponse(

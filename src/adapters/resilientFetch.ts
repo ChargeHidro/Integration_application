@@ -6,7 +6,6 @@ import {
   UpstreamError,
 } from "../core/errors/errors";
 import type { Logger } from "../core/logger";
-import type { TtlCache } from "../core/resilience/cache";
 import type { CircuitBreaker } from "../core/resilience/circuitBreaker";
 import type { RateLimiter } from "../core/resilience/rateLimiter";
 import { retry } from "../core/resilience/retry";
@@ -19,9 +18,8 @@ export interface RetrySettings {
   maxDelayMs: number;
 }
 
-export interface ResilienceDeps<T> {
+export interface ResilienceDeps {
   system: string;
-  cache: TtlCache<T>;
   retry: RetrySettings;
   logger: Logger;
   rateLimiter?: RateLimiter;
@@ -29,16 +27,11 @@ export interface ResilienceDeps<T> {
 }
 
 export interface FetchRequest<T> {
-  cacheKey: string;
   timeoutMs: number;
   call: (signal: AbortSignal) => Promise<T>;
-  notAfter?: (data: T) => Date | undefined;
 }
 
-export async function resilientFetch<T>(deps: ResilienceDeps<T>, request: FetchRequest<T>): Promise<SectionResult<T>> {
-  const cached = await deps.cache.get(request.cacheKey);
-  if (cached?.fresh) return { status: "ok", data: cached.value, fetchedAt: cached.fetchedAt };
-
+export async function resilientFetch<T>(deps: ResilienceDeps, request: FetchRequest<T>): Promise<SectionResult<T>> {
   const deadline = Date.now() + request.timeoutMs;
   try {
     const data = await withTimeout(
@@ -53,25 +46,22 @@ export async function resilientFetch<T>(deps: ResilienceDeps<T>, request: FetchR
       request.timeoutMs,
       `${deps.system} call`,
     );
-    const fetchedAt = new Date().toISOString();
-    await deps.cache.set(request.cacheKey, data, { notAfter: request.notAfter?.(data) });
-    return { status: "ok", data, fetchedAt };
+    return { status: "ok", data, fetchedAt: new Date().toISOString() };
   } catch (error) {
     const reason = reasonOf(error);
     if (error instanceof SchemaError) {
       deps.logger.error({ system: deps.system, issues: error.issues }, "vendor response failed schema validation");
-      return { status: "unavailable", data: null, reason };
+    } else {
+      deps.logger.warn(
+        { system: deps.system, reason, error: error instanceof Error ? error.message : String(error) },
+        "upstream call failed",
+      );
     }
-    deps.logger.warn(
-      { system: deps.system, reason, error: error instanceof Error ? error.message : String(error) },
-      "upstream call failed",
-    );
-    if (cached) return { status: "stale", data: cached.value, fetchedAt: cached.fetchedAt, reason };
     return { status: "unavailable", data: null, reason };
   }
 }
 
-async function attempt<T>(deps: ResilienceDeps<T>, request: FetchRequest<T>, signal: AbortSignal): Promise<T> {
+async function attempt<T>(deps: ResilienceDeps, request: FetchRequest<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) throw signal.reason;
   if (deps.rateLimiter) {
     const decision = await deps.rateLimiter.tryAcquire();

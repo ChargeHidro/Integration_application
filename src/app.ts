@@ -18,10 +18,10 @@ export interface AppDeps {
   config: Pick<Config, "auth" | "timeouts">;
   logger: Logger;
   repositories: Repositories;
-  adapters: SystemAdapters;
+  sources: SystemAdapters;
 }
 
-export function createApp({ config, logger, repositories, adapters }: AppDeps): Express {
+export function createApp({ config, logger, repositories, sources }: AppDeps): Express {
   const { timeouts } = config;
   const app = express();
 
@@ -35,7 +35,7 @@ export function createApp({ config, logger, repositories, adapters }: AppDeps): 
     sidebarRouter(
       new SidebarService({
         items: repositories.items,
-        adapters,
+        adapters: sources,
         settings: { budgetMs: timeouts.sidebarBudgetMs, sectionTimeoutMs: timeouts.sectionMs },
       }),
     ),
@@ -44,14 +44,14 @@ export function createApp({ config, logger, repositories, adapters }: AppDeps): 
     itemsRouter(
       new ResizeService({
         items: repositories.items,
-        adapters,
+        adapters: sources,
         settings: { sizingTimeoutMs: timeouts.resizeMs, catalogueTimeoutMs: timeouts.sectionMs },
       }),
     ),
   );
   app.use(
     projectsRouter(
-      new BomService({ bom: repositories.bom, adapters, settings: { priceTimeoutMs: timeouts.sectionMs } }),
+      new BomService({ bom: repositories.bom, adapters: sources, settings: { priceTimeoutMs: timeouts.sectionMs } }),
     ),
   );
 

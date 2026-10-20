@@ -8,8 +8,11 @@ import { createApp } from "../../src/app";
 import { loadConfig, type Config } from "../../src/config/env";
 import type { Caller } from "../../src/core/auth/caller";
 import { signToken } from "../../src/core/auth/tokens";
+import { RedisCacheStore } from "../../src/core/resilience/cache";
 import { startMocks, type Mocks } from "../../src/mocks/mockServers";
 import { createMemoryRepositories } from "../../src/repositories/memory/memoryRepositories";
+import type { Repositories } from "../../src/repositories/types";
+import { createSources, sizingKey } from "../../src/sources/createSources";
 import { channelPartner, salesEngineer } from "../support/fakes";
 
 const redisUrl = process.env.REDIS_URL ?? "redis://localhost:56379";
@@ -24,6 +27,7 @@ describe.runIf(redisAvailable)("Integration API end to end (mocks + redis)", () 
   let mocks: Mocks;
   let redis: Redis;
   let config: Config;
+  let repositories: Repositories;
   let app: ReturnType<typeof createApp>;
 
   const bearer = async (caller: Caller) => `Bearer ${await signToken(caller, config.auth)}`;
@@ -49,12 +53,14 @@ describe.runIf(redisAvailable)("Integration API end to end (mocks + redis)", () 
       BREAKER_COOLDOWN_MS: "60000",
     });
     const logger = pino({ level: "silent" });
-    app = createApp({
-      config,
-      logger,
-      repositories: createMemoryRepositories(),
+    repositories = createMemoryRepositories();
+    const sources = createSources(config, {
+      cacheStore: new RedisCacheStore(redis),
+      repositories,
       adapters: createAdapters(config, { redis, logger }),
+      logger,
     });
+    app = createApp({ config, logger, repositories, sources });
   });
 
   afterAll(async () => {
@@ -84,20 +90,35 @@ describe.runIf(redisAvailable)("Integration API end to end (mocks + redis)", () 
     expect(response.body.sections.sizing).toEqual({ status: "unavailable", data: null, reason: "timeout" });
   });
 
-  it("serves cached sizing as stale when sizing fails later", async () => {
+  it("answers a repeated sidebar from Redis without calling the systems again", async () => {
     const auth = await bearer(salesEngineer);
     await request(app).get("/items/DRV-03/sidebar").set("Authorization", auth);
-    const [key] = await redis.keys(`${redis.options.keyPrefix}size:*`);
-    const stored = JSON.parse((await redis.get(key!.slice(redis.options.keyPrefix!.length)))!);
-    await redis.set(
-      key!.slice(redis.options.keyPrefix!.length),
-      JSON.stringify({ ...stored, fetchedAt: stored.fetchedAt - 16 * 60 * 1000 }),
-    );
-    mocks.sizing.failRate = 1;
+    const sizingCalls = mocks.sizing.requests;
 
     const response = await request(app).get("/items/DRV-03/sidebar").set("Authorization", auth);
 
-    expect(response.body.sections.sizing).toMatchObject({ status: "stale", data: { variantCode: "ACS-R6-400" } });
+    expect(response.body.sections.sizing.status).toBe("ok");
+    expect(mocks.sizing.requests).toBe(sizingCalls);
+    expect(await repositories.sizingResults.get(sizingKey({ motorKw: 45, voltage: 400 }, "v1"))).not.toBeNull();
+    expect(await repositories.priceSnapshots.get({ variantCode: "ACS-R6-400", country: "IN", customerGroup: "OEM" })).not.toBeNull();
+  });
+
+  it("serves the stored PostgreSQL sizing result as stale when sizing fails", async () => {
+    const eightDaysAgo = new Date(Date.now() - 8 * 24 * 3600 * 1000).toISOString();
+    await repositories.sizingResults.put(
+      sizingKey({ motorKw: 45, voltage: 400 }, "v1"),
+      { variantCode: "ACS-R6-400", loadPct: 77, frame: "R6" },
+      eightDaysAgo,
+    );
+    mocks.sizing.failRate = 1;
+
+    const response = await request(app).get("/items/DRV-03/sidebar").set("Authorization", await bearer(salesEngineer));
+
+    expect(response.body.sections.sizing).toMatchObject({
+      status: "stale",
+      data: { variantCode: "ACS-R6-400", loadPct: 77 },
+      fetchedAt: eightDaysAgo,
+    });
   });
 
   it("opens the sizing circuit after repeated failures and stops calling the mock", async () => {

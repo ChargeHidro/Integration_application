@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import { ConflictError, NotFoundError } from "../../src/core/errors/errors";
 import type { Repositories } from "../../src/repositories/types";
@@ -77,6 +78,69 @@ export function describeRepositoryContract(name: string, fresh: () => Promise<Re
 
       await expect(repos.items.applyResize({ ...change, variantCode: "ACS-R8-400" })).rejects.toBeInstanceOf(ConflictError);
       await expect(repos.items.findById("DRV-03")).resolves.toMatchObject({ variantCode: "ACS-R7-400", version: 2 });
+    });
+
+    it("stores and reads a catalogue variant snapshot", async () => {
+      const query = { variantCode: `ACS-${randomUUID()}` };
+      const variant = {
+        code: query.variantCode,
+        model: "ACS Drive",
+        description: "Drive",
+        frame: "R7",
+        ratedKw: 75,
+        voltage: 400,
+        ipRating: "IP21",
+        options: ["EMC filter"],
+        dimensionsMm: { w: 1, h: 2, d: 3 },
+        model3d: { lod0: "a.glb", lod1: "b.glb", lod2: "c.glb" },
+      };
+
+      await expect(repos.catalogueVariants.get(query)).resolves.toBeNull();
+      await repos.catalogueVariants.put(query, variant, "2026-10-21T08:00:00.000Z");
+
+      await expect(repos.catalogueVariants.get(query)).resolves.toEqual({
+        value: variant,
+        fetchedAt: "2026-10-21T08:00:00.000Z",
+      });
+    });
+
+    it("stores a sizing result per input hash and API version", async () => {
+      const key = { inputHash: randomUUID(), apiVersion: "v1" };
+      const result = { variantCode: "ACS-R7-400", loadPct: 88.5, frame: "R7" };
+
+      await repos.sizingResults.put(key, result, "2026-10-21T08:00:00.000Z");
+
+      await expect(repos.sizingResults.get(key)).resolves.toEqual({ value: result, fetchedAt: "2026-10-21T08:00:00.000Z" });
+      await expect(repos.sizingResults.get({ ...key, apiVersion: "v2" })).resolves.toBeNull();
+    });
+
+    it("stores a price snapshot per variant, country and customer group", async () => {
+      const query = { variantCode: `ACS-${randomUUID()}`, country: "DE", customerGroup: "OEM" };
+      const quote = {
+        variantCode: query.variantCode,
+        country: "DE",
+        currency: "EUR",
+        price: 5580.5,
+        leadTimeDays: 21,
+        validUntil: "2026-10-22T08:00:00.000Z",
+      };
+
+      await repos.priceSnapshots.put(query, quote, "2026-10-21T08:00:00.000Z");
+
+      await expect(repos.priceSnapshots.get(query)).resolves.toEqual({ value: quote, fetchedAt: "2026-10-21T08:00:00.000Z" });
+      await expect(repos.priceSnapshots.get({ ...query, customerGroup: "DISTRIBUTOR" })).resolves.toBeNull();
+    });
+
+    it("never lets an older snapshot overwrite a newer one", async () => {
+      const key = { inputHash: randomUUID(), apiVersion: "v1" };
+      await repos.sizingResults.put(key, { variantCode: "ACS-R8-400", loadPct: 70 }, "2026-10-21T09:00:00.000Z");
+
+      await repos.sizingResults.put(key, { variantCode: "ACS-R7-400", loadPct: 95 }, "2026-10-21T08:00:00.000Z");
+
+      await expect(repos.sizingResults.get(key)).resolves.toMatchObject({
+        value: { variantCode: "ACS-R8-400" },
+        fetchedAt: "2026-10-21T09:00:00.000Z",
+      });
     });
 
     it("rejects a resize of an unknown item", async () => {

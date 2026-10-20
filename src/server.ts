@@ -3,7 +3,9 @@ import { createAdapters } from "./adapters/createAdapters";
 import { createApp } from "./app";
 import { loadConfig } from "./config/env";
 import { createLogger } from "./core/logger";
+import { RedisCacheStore } from "./core/resilience/cache";
 import { createRepositories } from "./repositories/createRepositories";
+import { createSources } from "./sources/createSources";
 
 const config = loadConfig();
 const logger = createLogger(config.logLevel);
@@ -13,12 +15,14 @@ redis.on("error", (error: Error) => logger.warn({ error: error.message }, "redis
 await redis.connect().catch((error: Error) => logger.warn({ error: error.message }, "redis not reachable at startup"));
 
 const repositoryHandle = createRepositories(config);
-const app = createApp({
-  config,
-  logger,
-  repositories: repositoryHandle.repositories,
+const { repositories } = repositoryHandle;
+const sources = createSources(config, {
+  cacheStore: new RedisCacheStore(redis),
+  repositories,
   adapters: createAdapters(config, { redis, logger }),
+  logger,
 });
+const app = createApp({ config, logger, repositories, sources });
 
 const server = app.listen(config.port, () => {
   logger.info({ port: config.port, repository: config.repository }, "Integration API listening");

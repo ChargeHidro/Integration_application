@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Integration Layer Architecture</title>
+<style>
+  @page { size: A4; margin: 12mm 12mm 12mm 12mm; }
+  :root { --ink: #1a1f2b; --muted: #5b6475; --accent: #1f3a8a; --rule: #d8dce4; --soft: #f4f6fa; }
+  * { box-sizing: border-box; }
+  body { font-family: "Segoe UI", Inter, Arial, sans-serif; color: var(--ink); font-size: 9.5pt; line-height: 1.35; margin: 0; background: #fff; }
+  h1 { color: var(--accent); font-size: 20pt; margin: 0 0 4px; }
+  h2 { color: var(--accent); font-size: 13pt; border-bottom: 2px solid var(--accent); padding-bottom: 3px; margin: 16px 0 6px; page-break-after: avoid; }
+  h3 { font-size: 10.5pt; margin: 10px 0 4px; page-break-after: avoid; }
+  p { margin: 4px 0 6px; }
+  ol, ul { margin: 4px 0 6px; padding-left: 20px; }
+  li { margin: 1px 0; }
+  .subtitle { color: var(--muted); margin: 0 0 10px; }
+  table { width: 100%; border-collapse: collapse; margin: 6px 0 8px; font-size: 8.5pt; line-height: 1.3; page-break-inside: auto; }
+  th, td { border: 1px solid var(--rule); padding: 3px 6px; text-align: left; vertical-align: top; }
+  th { background: var(--soft); }
+  tr { page-break-inside: avoid; }
+  code, pre { font-family: Consolas, "Cascadia Mono", monospace; font-size: 8.5pt; }
+  pre { background: var(--soft); border: 1px solid var(--rule); border-radius: 6px; padding: 8px 10px; white-space: pre-wrap; page-break-inside: avoid; }
+  figure { margin: 6px 0; page-break-inside: avoid; }
+  figure img { width: 100%; border: 1px solid var(--rule); }
+  figcaption { color: var(--muted); font-size: 8.5pt; margin-top: 4px; }
+</style>
+</head>
+<body>
+
+<h1>Integration Layer Design: 3D Sales Workspace</h1>
+<p class="subtitle">Backend Assessment, Part A (architecture and design) &middot; Candidate: Rohit Sharma &middot; 20 October 2026</p>
+
+<h2>1. Architecture flow</h2>
+
+
+<h3>1.1 Trust zones</h3>
+<table>
+  <tr><th>Zone</th><th>Contains</th><th>Trust</th></tr>
+  <tr><td>Untrusted zone</td><td>Browser (React workspace with the 3D room and sidebar)</td><td>Untrusted. Every request is authenticated and authorised on the server.</td></tr>
+  <tr><td>Customer identity</td><td>OpenID Connect identity provider</td><td>Issues and signs tokens; the API verifies them against its JWKS.</td></tr>
+  <tr><td>Customer Azure tenant</td><td>Firewall (WAF), Integration API, Redis, PostgreSQL, workers, adapters, Blob storage, Key Vault, monitoring</td><td>Trusted. Our code and data stores.</td></tr>
+  <tr><td>Enterprise systems</td><td>Sizing tool, Pricing ERP, Catalogue, Document vault, Host project API</td><td>Owned by other teams and cannot be changed. Their responses are validated as untrusted input.</td></tr>
+</table>
+
+<h3>1.2 Read flow: selecting an item fills the sidebar</h3>
+<ol>
+  <li>The user signs in through the identity provider (OIDC authorisation code with PKCE) and the browser receives an access token.</li>
+  <li>The browser calls the Integration API over HTTPS through the customer WAF, sending the token as a Bearer header.</li>
+  <li>The API verifies the token (signature against JWKS, issuer, audience, expiry) and builds the caller context: role, country and customer group.</li>
+  <li>The API loads the item from PostgreSQL and fans out to the adapters in parallel. Adapters run in-process, one per system.</li>
+  <li>Each adapter checks the Redis cache first. On a miss it takes a token from the global rate limit in Redis and calls its system over HTTPS REST.</li>
+  <li>Pricing is called only if the caller is entitled to see prices. The entitlement check runs before the cache is read.</li>
+  <li>Every vendor response is validated against a schema. The API returns one section per system, each with its own status, so one failing system never blanks the sidebar.</li>
+</ol>
+
+<h3>1.3 Write flow: re-sizing an item</h3>
+<ol>
+  <li>The browser sends the re-size request with an idempotency key, so a retried click cannot apply twice.</li>
+  <li>The API calls the sizing tool through its adapter, with the user's delegated (OBO) token.</li>
+  <li>If the recommended variant changed, one PostgreSQL transaction updates the item's variant and 3D model reference, its BOM line and its version, and writes an outbox row.</li>
+  <li>A worker reads the outbox and saves the change to the Host project API with <code>If-Match</code> on the version, so a save is never duplicated and never overwrites a newer change.</li>
+</ol>
+
+<h3>1.4 Background and slow work</h3>
+<ul>
+  <li><strong>Job queue in Redis.</strong> Slow calls and retries become jobs. The job ID is built from type, item, version and change, so duplicate requests merge into one job.</li>
+  <li><strong>Slow-service worker.</strong> Runs queued calls to slow or rate-limited systems through the same adapters.</li>
+  <li><strong>Scheduled worker.</strong> Imports the catalogue nightly export and change feed into PostgreSQL with an upsert by revision, so an old update never overwrites a newer one. It stores 3D models in Blob storage.</li>
+  <li><strong>Dead-letter queue.</strong> Jobs that keep failing go to the DLQ for inspection and alerting.</li>
+</ul>
+
+<h3>1.5 Inbound events from the host</h3>
+<p>The Host project API sends a webhook over HTTPS when a project changes elsewhere. It passes the WAF, its HMAC signature is verified, and its event ID is checked so a repeated event is processed only once.</p>
+
+<h3>1.6 Direct downloads</h3>
+<ul>
+  <li><strong>3D models:</strong> the browser downloads glTF files from Blob storage with a SAS signed URL.</li>
+  <li><strong>Documents:</strong> the browser downloads a file directly from the Document vault with a short-lived signed URL.</li>
+</ul>
+<p>Large files never pass through the Integration API.</p>
+
+<h3>1.7 Connections to each enterprise system</h3>
+<table>
+  <tr><th>System</th><th>Protocol</th><th>Credential</th><th>Limits and rules</th></tr>
+  <tr><td>Sizing tool</td><td>HTTPS REST</td><td>User token (OBO)</td><td>Max 18 req/s across the whole service</td></tr>
+  <tr><td>Pricing ERP</td><td>HTTPS REST</td><td>Service account</td><td>Max 4.5 req/s; entitlement checked before every call</td></tr>
+  <tr><td>Catalogue</td><td>Nightly export and change feed</td><td>Service account</td><td>Read by the scheduled worker, not on the request path</td></tr>
+  <tr><td>Document vault</td><td>HTTPS REST</td><td>User token (OBO)</td><td>Per-document permissions</td></tr>
+  <tr><td>Host project API</td><td>HTTPS REST; webhooks back</td><td>User token (OBO)</td><td><code>If-Match</code> version on save</td></tr>
+</table>
+
+<h3>1.8 Supporting services</h3>
+<ul>
+  <li><strong>Key Vault:</strong> holds vendor credentials and the webhook key; no secrets in code.</li>
+  <li><strong>Monitoring:</strong> collects logs, metrics and traces from all services.</li>
+</ul>
+
+<h3>1.9 AI assistant flow</h3>
+<p>The assistant runs in its own container inside the tenant and never calls an enterprise system directly. Every tool it uses is a call to the same Integration API services the sidebar uses, made with the user's own context, so it can never see more than the user can.</p>
+<ol>
+  <li><strong>Question in.</strong> The browser sends the question to the Integration API (HTTPS, Bearer JWT). The API verifies the token and forwards the question with the caller context to the Assistant container over internal HTTPS.</li>
+  <li><strong>Orchestrator.</strong> Picks the module agent that fits the question (BOM, sizing or catalogue) and loads the conversation memory from PostgreSQL.</li>
+  <li><strong>Module agent.</strong> Reasons with the Private LLM over a private endpoint. The LLM has no credentials and no outbound internet, so it can only suggest tool calls, never perform them.</li>
+  <li><strong>Read or write?</strong> A read tool (for example <code>get_item_details</code>, <code>get_bom_cost</code>) runs straight away. A write tool (for example <code>resize_item</code>) goes to <strong>human in the loop</strong>: the user sees the proposed change and must confirm it. On confirm, the UI receives a signed, single-use confirmation bound to the user, item and arguments. The model cannot produce this confirmation itself. On decline, the agent is told no and nothing changes.</li>
+  <li><strong>Tool registry (MCP).</strong> Tool calls carry only IDs and parameters. They run as the user, against the Integration API services, through the same entitlements, cache, adapters and rate limits as the sidebar.</li>
+  <li><strong>Validator / formatter.</strong> Checks the draft answer before it leaves: no price if the user may not see prices, plain text only, and every figure must come from a tool result. If a check fails, the answer goes back to the agent with a critique.</li>
+  <li><strong>Answer out.</strong> The answer is returned to the Integration API and streamed to the browser over SSE. The question, every tool call, entitlement decisions, confirmations and the answer are written to the audit log in PostgreSQL.</li>
+</ol>
+<p><strong>Prompt injection.</strong> Catalogue text and document content are untrusted. They reach the model only as clearly separated data, never as instructions. Even if injected text convinces the model, it still cannot exceed the user's permissions, cannot write without the user's confirmation, and has no network path to send data out.</p>
+
+<h3>1.10 Example: re-sizing a drive through the assistant</h3>
+<p>A sales engineer in Germany asks the assistant: <em>"Increase the motor on DRV-03 to 90 kW and re-size it."</em> DRV-03 is currently variant <code>ACS-R7-75-400</code> (frame R7), at item version 7. The steps below follow the request through every component of the architecture.</p>
+<table>
+  <tr><th style="width:4%">#</th><th style="width:20%">Component</th><th>What happens</th></tr>
+  <tr><td>1</td><td>Browser → WAF → Integration API</td><td>The question is sent with the Bearer token. The API verifies the token and builds the caller context: <code>sales_engineer</code>, country DE, customer group G1.</td></tr>
+  <tr><td>2</td><td>Assistant container</td><td>The orchestrator routes the question to the sizing agent. With the Private LLM, the agent prepares a preview call: <code>preview_resize(DRV-03, 90 kW, 400 V)</code>. A preview only reads, so it needs no approval.</td></tr>
+  <tr><td>3</td><td>Integration API: sizing read order</td><td>&#9312; Redis <code>size:{hash(inputs, apiVersion)}</code>: miss. &#9313; PostgreSQL sizing results for that input hash: miss. &#9314; Only now is the sizing adapter called.</td></tr>
+  <tr><td>4</td><td>Sizing adapter</td><td>Checks the circuit breaker (closed), takes a token from the sizing rate limit in Redis, and uses the cached OBO token for this user. A sizing run takes 1 to 6 s, so the call becomes an interactive job; its job ID is the input hash, so identical requests from other users merge into the same job.</td></tr>
+  <tr><td>5</td><td>Worker (interactive) → Sizing tool</td><td>The worker calls the sizing tool over HTTPS REST. The response is validated against its schema: recommended variant <code>ACS-R8-90-400</code> (frame R8), 88 % load. &#9315; The result is written to PostgreSQL and to Redis (fresh for 15 minutes).</td></tr>
+  <tr><td>6</td><td>Human in the loop</td><td>The agent shows the proposal: R7 → R8, the BOM change and the price difference. The user clicks <strong>Confirm</strong> and the UI receives a signed confirmation valid for 5 minutes.</td></tr>
+  <tr><td>7</td><td>Tool registry → Integration API</td><td><code>resize_item</code> runs with the confirmation, the user's context and <code>If-Match: 7</code>. The sizing result is now a Redis hit, so the sizing tool is <strong>not</strong> called a second time.</td></tr>
+  <tr><td>8</td><td>PostgreSQL (one transaction)</td><td>The variant changed, so one transaction updates the item's variant and 3D model reference, its BOM line, sets version 8 and writes an outbox row. Either all of it is saved or none of it is.</td></tr>
+  <tr><td>9</td><td>Pricing</td><td>The entitlement check passes for a sales engineer. Price for R8 in DE/G1: Redis miss, then a valid PostgreSQL price snapshot, else the pricing adapter calls the ERP within its rate limit.</td></tr>
+  <tr><td>10</td><td>Validator → SSE → Browser</td><td>The answer is checked (prices allowed for this user) and streamed: <em>"DRV-03 re-sized from R7 to R8 at 88 % load. BOM: R7 removed, R8 added. Price updated."</em> An <code>item.updated</code> event makes the browser load the R8 model from Blob storage (lowest detail first) and refresh the BOM and price panels.</td></tr>
+  <tr><td>11</td><td>Worker (interactive) → Host project API</td><td>The worker claims the outbox row and saves the change to the host with <code>If-Match</code> and an idempotency key. The host's webhook for this change carries version 8, which is already applied, so it is ignored.</td></tr>
+  <tr><td>12</td><td>Audit log</td><td>The question, the preview and resize tool calls, the confirmation and the answer are stored.</td></tr>
+</table>
+<p><strong>What changes in other cases:</strong></p>
+<ul>
+  <li><strong>Sizing tool down or circuit open:</strong> step 4 stops. The assistant says sizing is unavailable and nothing changes.</li>
+  <li><strong>The user declines:</strong> step 7 never runs. No write, no outbox row.</li>
+  <li><strong>Same variant recommended:</strong> step 8 writes nothing to the item or BOM; the answer says no re-size is needed.</li>
+  <li><strong>Channel partner:</strong> the flow is the same, but step 9 returns <code>not_permitted</code> without calling pricing, and the validator ensures the answer contains no price.</li>
+</ul>
+
+<h2>2. Technology choices</h2>
+
+<p>The guiding rule is <strong>fewer moving parts</strong>. The real bottlenecks are the external systems' rate limits and outages, not our own compute, so every component must earn its place. The reference stack (Node.js, Express, MongoDB, Redis) was the starting point; we kept what fits and changed the database, with the reasons below.</p>
+
+<h3>2.1 Choice per component</h3>
+<table>
+  <tr><th style="width:18%">Component</th><th style="width:24%">Choice</th><th>Why</th></tr>
+  <tr><td>Runtime</td><td>Node.js 20 LTS, TypeScript (strict)</td><td>The service mostly waits on slow external systems. Non-blocking I/O handles many parallel calls per sidebar request cheaply. Strict types make the panel and adapter contracts explicit.</td></tr>
+  <tr><td>HTTP framework</td><td>Express</td><td>Small, well known and easy to review. Handlers stay thin; the logic lives in services, so the framework is not a lock-in.</td></tr>
+  <tr><td>System of record</td><td>PostgreSQL (Azure Database for PostgreSQL, Flexible Server)</td><td>Relational data and multi-row transactions. See 2.2.</td></tr>
+  <tr><td>Cache, rate limits, job queue, pub/sub</td><td>Redis (Azure Cache for Redis) with BullMQ</td><td>One component covers four needs. Rate limits apply to the whole service, so the counters must be shared by all API replicas, not held in process memory. BullMQ adds priority queues, job-ID dedupe, retries and a dead-letter queue. Pub/sub routes a push event to the replica that holds the user's connection.</td></tr>
+  <tr><td>Push to browser</td><td>Server-Sent Events (SSE)</td><td>Push is one-way (server to browser). SSE runs over plain HTTPS through the WAF, reuses the Bearer token and reconnects automatically.</td></tr>
+  <tr><td>Validation</td><td>zod</td><td>Validates configuration, request bodies and every vendor response. A schema failure is how a vendor API change is caught before users notice.</td></tr>
+  <tr><td>Tokens</td><td>jose (JWT and JWKS); MSAL for the OBO exchange</td><td>Standards-based checks of signature, issuer, audience and expiry. The identity provider supports the on-behalf-of flow for systems that need the user's own token.</td></tr>
+  <tr><td>3D models</td><td>Azure Blob Storage behind a CDN</td><td>glTF files of 2 to 40 MB must not flow through the API. Content-hashed paths are immutable and cacheable; the browser downloads them with short-lived SAS URLs.</td></tr>
+  <tr><td>Hosting and edge</td><td>Azure Container Apps in a private VNet, behind the customer's WAF</td><td>Containers in the customer's tenant, as required. Autoscaling by HTTP load and queue depth, internal ingress for workers, managed identity for every component.</td></tr>
+  <tr><td>Secrets</td><td>Azure Key Vault with managed identity</td><td>No secrets in code, images or environment files.</td></tr>
+  <tr><td>Logs and observability</td><td>pino (JSON logs), OpenTelemetry to Azure Monitor</td><td>Structured logs with request IDs, one trace per user action across adapters, and alerts on breaker state, rate-limit rejections and schema failures.</td></tr>
+  <tr><td>Tests and local setup</td><td>Vitest, supertest, Docker Compose</td><td>Fast HTTP-level tests against the real app. Postgres and Redis start locally with one command.</td></tr>
+</table>
+
+<h3>2.2 Why PostgreSQL instead of MongoDB</h3>
+<p>MongoDB is the reference stack's database, so this choice needs the clearest reasoning. It comes from the shape of the data and the consistency the workspace needs.</p>
+<table>
+  <tr><th style="width:26%">Need</th><th style="width:37%">PostgreSQL</th><th>MongoDB</th></tr>
+  <tr><td><strong>Re-size must stay consistent.</strong> Variant, 3D model reference, BOM line, version and outbox row change together.</td><td>One ACID transaction across several tables. All of it is saved or none of it is.</td><td>Either embed the whole project in one document, which grows large and conflicts when several items are edited, or use multi-document transactions, which need a replica set and are not the usual Mongo pattern.</td></tr>
+  <tr><td><strong>The data is relational.</strong> Project → item → variant → BOM line → price snapshot.</td><td>Foreign keys and unique constraints (one BOM line per item) are enforced by the database.</td><td>References between collections are checked only by application code.</td></tr>
+  <tr><td><strong>Idempotency and concurrent edits.</strong></td><td><code>INSERT … ON CONFLICT</code> for upserts by revision, unique idempotency keys, and a version column for optimistic locking (409 on mismatch).</td><td>Possible with unique indexes and conditional updates, but each case must be hand-built.</td></tr>
+  <tr><td><strong>Outbox to the host.</strong></td><td>The outbox row is written in the same transaction as the change, which is what makes the pattern reliable.</td><td>Needs a multi-document transaction or change streams for the same guarantee.</td></tr>
+  <tr><td><strong>Search over 12,000 variants.</strong></td><td>Built-in full-text search plus trigram indexes on variant codes. No separate search engine.</td><td>Text indexes work; Atlas Search is a separate service outside the customer's tenant.</td></tr>
+  <tr><td><strong>Variable product attributes.</strong></td><td><code>JSONB</code> columns give document-style flexibility where it helps, while the core relations stay strict.</td><td>Flexible documents are Mongo's strength.</td></tr>
+  <tr><td><strong>Hosting in the customer's Azure tenant, with a security review.</strong></td><td>First-party managed service with private endpoint, Entra ID login, zone-redundant HA and point-in-time restore.</td><td>Cosmos DB's Mongo API has compatibility gaps; Atlas runs outside the customer's subscription.</td></tr>
+  <tr><td><strong>Scale</strong> (600 concurrent sessions, 5,000 users).</td><td>A light load. Read replicas and connection pooling cover growth to 50,000 users.</td><td>Also sufficient; scale does not decide this choice.</td></tr>
+</table>
+<p><strong>What we give up:</strong> the team already knows MongoDB, and its flexible documents would suit catalogue attributes and raw vendor payloads. <code>JSONB</code> covers that need without giving up transactions and constraints, which the re-size flow depends on.</p>
+
+<h3>2.3 PostgreSQL indexes</h3>
+<p>Indexes are chosen from the queries the service actually runs, not added to every column. Each one speeds up a hot read path or enforces a rule the data depends on. Three principles:</p>
+<ul>
+  <li><strong>Index what the request path reads.</strong> The sidebar has a 1 s budget, so its lookups (item by ID, catalogue by variant, price by variant + country + group) must be single index lookups.</li>
+  <li><strong>Let unique indexes enforce rules.</strong> One BOM line per item, one inbox entry per webhook event, one result per idempotency key. The database rejects a duplicate even if application code has a bug.</li>
+  <li><strong>Keep write-heavy tables lean.</strong> Every index slows down inserts. The outbox and audit log get only what their readers need, using partial and BRIN indexes to stay small.</li>
+</ul>
+<p>PostgreSQL creates an index for every primary key and unique constraint automatically, but <strong>not</strong> for foreign keys, so those are added explicitly where they are queried.</p>
+<table>
+  <tr><th style="width:17%">Table</th><th style="width:27%">Index</th><th style="width:11%">Type</th><th>Why (the query or rule it serves)</th></tr>
+  <tr><td>items</td><td><code>item_id</code> (primary key)</td><td>B-tree</td><td>Every sidebar, re-size and assistant call loads one item by ID. A single lookup of about a millisecond.</td></tr>
+  <tr><td>items</td><td><code>project_id</code></td><td>B-tree</td><td>Foreign key. Loading a project's layout, building its BOM and checking project membership all filter by project.</td></tr>
+  <tr><td>bom_lines</td><td><code>item_id</code> UNIQUE</td><td>B-tree</td><td>Enforces exactly one BOM line per placed item, and lets the re-size transaction find that line directly.</td></tr>
+  <tr><td>bom_lines</td><td><code>project_id</code></td><td>B-tree</td><td>Foreign key. The project BOM endpoint reads all lines of a project.</td></tr>
+  <tr><td>price_snapshots</td><td>(<code>variant_code</code>, <code>country</code>, <code>customer_group</code>) primary key</td><td>B-tree</td><td>The step &#9313; price lookup after a Redis miss. The column order matches the Redis cache key, so it is one exact lookup.</td></tr>
+  <tr><td>price_snapshots</td><td><code>valid_until</code></td><td>B-tree</td><td>The scheduled worker finds quotes about to expire for prefetch, and expired rows for clean-up.</td></tr>
+  <tr><td>sizing_results</td><td>(<code>input_hash</code>, <code>api_version</code>) UNIQUE</td><td>B-tree</td><td>The step &#9313; sizing lookup. The same inputs on the same API version give the same result, so it is stored once and reused by every user.</td></tr>
+  <tr><td>catalogue_variants</td><td><code>variant_code</code> (primary key)</td><td>B-tree</td><td>The catalogue panel reads one variant by code; items and BOM lines reference it.</td></tr>
+  <tr><td>catalogue_variants</td><td>search vector over name and description</td><td>GIN (full-text)</td><td>Word search across 12,000 variants ("IP55 drive 400 V") without a separate search engine.</td></tr>
+  <tr><td>catalogue_variants</td><td><code>variant_code</code> with trigram operators</td><td>GIN (pg_trgm)</td><td>Partial and fuzzy code search, for example "R7" or "ACS880", which a normal B-tree cannot answer.</td></tr>
+  <tr><td>catalogue_variants</td><td>(<code>frame</code>, <code>voltage</code>, <code>power_kw</code>)</td><td>B-tree</td><td>Filters for search facets and for finding the variants that fit a sizing result.</td></tr>
+  <tr><td>catalogue_variants</td><td><code>attributes</code> (JSONB)</td><td>GIN</td><td>Lets queries filter on variable technical attributes (options, IP rating) stored as JSON.</td></tr>
+  <tr><td>outbox</td><td><code>created_at</code> WHERE <code>status = 'pending'</code></td><td>Partial B-tree</td><td>The worker claims the oldest pending rows. The index holds only unsent rows, so it stays tiny however large the table grows.</td></tr>
+  <tr><td>webhook_inbox</td><td><code>event_id</code> UNIQUE</td><td>B-tree</td><td>Deduplicates webhooks: a repeated event from the host fails the insert and is processed only once.</td></tr>
+  <tr><td>idempotency_keys</td><td><code>key</code> UNIQUE</td><td>B-tree</td><td>A repeated re-size click with the same key returns the stored first result instead of applying twice.</td></tr>
+  <tr><td>audit_log</td><td><code>created_at</code></td><td>BRIN</td><td>Append-only and time-ordered. A BRIN index is a fraction of a B-tree's size and fits time-range queries.</td></tr>
+  <tr><td>audit_log</td><td>(<code>user_id</code>, <code>created_at</code>)</td><td>B-tree</td><td>Answers "what did this user (or the assistant on their behalf) do" during reviews and security investigations.</td></tr>
+  <tr><td>assistant_memory</td><td>(<code>conversation_id</code>, <code>created_at</code>)</td><td>B-tree</td><td>The orchestrator loads the recent turns of one conversation in order.</td></tr>
+</table>
+<p><strong>Verified, not guessed:</strong> the hot queries are checked with <code>EXPLAIN ANALYZE</code> in tests against seeded data, and unused indexes are found with <code>pg_stat_user_indexes</code> and removed.</p>
+
+<h3>2.4 Other alternatives considered and rejected</h3>
+<table>
+  <tr><th style="width:26%">Alternative</th><th>Why not</th></tr>
+  <tr><td>Microservice per enterprise system</td><td>More network hops inside a 1 s budget, cross-service coordination for global rate limits and a larger attack surface. Splitting would not raise the external limits. Adapters stay isolated, so any one can be extracted later.</td></tr>
+  <tr><td>Kafka or Azure Service Bus</td><td>Redis with BullMQ already covers priority, dedupe and retries with one fewer component. Service Bus is the upgrade path if stronger delivery guarantees are needed.</td></tr>
+  <tr><td>Elasticsearch or Azure AI Search</td><td>12,000 variants fit comfortably in Postgres full-text and trigram search. Another cluster adds cost and operations.</td></tr>
+  <tr><td>WebSockets</td><td>Push is one-way; SSE is simpler and passes the WAF as plain HTTPS.</td></tr>
+  <tr><td>GraphQL gateway</td><td>Adds a schema layer, and partial failures are less explicit than a status per sidebar section.</td></tr>
+  <tr><td>API gateway product as the backend</td><td>It can route and throttle, but cannot hold the sidebar aggregation, per-section statuses or entitlement filtering. At most it sits in front as the edge.</td></tr>
+</table>
+
+<h2>3. Key sequences</h2>
+<p>All three sequences use the same project: a water-plant pump room with drive DRV-03, currently variant <code>ACS-R7-75-400</code> (frame R7, 75 kW motor) at item version 7. Every data read follows the same order: &#9312; Redis, &#9313; PostgreSQL, &#9314; adapter to the external system only on a miss, &#9315; write the result back.</p>
+
+<h3>3.1 Sequence 1: the engineer clicks a drive and the sidebar fills (sizing tool down)</h3>
+<p><strong>Goal:</strong> useful content in every panel within 1 s, even though the sizing tool is down.</p>
+<table>
+  <tr><th style="width:4%">#</th><th style="width:20%">Component</th><th>What happens</th></tr>
+  <tr><td>1</td><td>Browser</td><td>The engineer clicks DRV-03. The 3D view highlights it immediately on the client; no network call is needed for that.</td></tr>
+  <tr><td>2</td><td>Browser → WAF → Integration API</td><td><code>GET /api/items/DRV-03/sidebar</code> with the Bearer token.</td></tr>
+  <tr><td>3</td><td>Integration API</td><td>Verifies the token, builds the caller context (<code>sales_engineer</code>, DE, group G1), checks that the user is a member of this project, and loads the item from PostgreSQL.</td></tr>
+  <tr><td>4</td><td>Integration API: fan-out</td><td>Starts the four panels <strong>in parallel</strong>, each with its own deadline of about 800 ms.</td></tr>
+  <tr><td>4a</td><td>Catalogue panel</td><td>&#9312; Redis hit for <code>ACS-R7-75-400</code> → <code>ok</code>. (On a miss, &#9313; the catalogue read model in PostgreSQL answers; the catalogue system itself is never called on this path.)</td></tr>
+  <tr><td>4b</td><td>Sizing panel</td><td>&#9312; Redis: miss. &#9313; PostgreSQL holds DRV-03's last sizing result (R7, 72 % load). It needs a refresh, but the <strong>circuit breaker is open</strong> because the sizing tool is failing, so &#9314; the sizing tool is <strong>not called</strong>. The stored result is returned as <code>stale</code> with "sizing unavailable since 13:40". If no stored result existed, the status would be <code>unavailable</code>.</td></tr>
+  <tr><td>4c</td><td>Pricing panel</td><td>The entitlement check passes (sales engineers may see prices). &#9312; Redis hit for R7 / DE / G1 → <code>ok</code>. On a miss: &#9313; a still-valid PostgreSQL price snapshot, else &#9314; the ERP within its rate limit. If the ERP cannot answer before the deadline, the panel returns <code>pending</code> and a job finishes the call.</td></tr>
+  <tr><td>4d</td><td>Documents panel</td><td>The document list for the variant comes from Redis or the document vault (with the user's OBO token) and is filtered by this user's permissions → <code>ok</code>.</td></tr>
+  <tr><td>5</td><td>Integration API → Browser</td><td>Responds within about 900 ms with one section per panel: catalogue <code>ok</code>, sizing <code>stale</code>, pricing <code>ok</code>, documents <code>ok</code>. Each panel renders on its own; the sizing panel shows its banner.</td></tr>
+  <tr><td>6</td><td>Redis Pub/Sub → SSE</td><td>Any <code>pending</code> section is completed by a worker and pushed as a <code>panel.updated</code> event. Redis Pub/Sub routes it to the API replica that holds this user's SSE connection.</td></tr>
+</table>
+<p><strong>Result:</strong> one failing system turns one panel <code>stale</code>; the other panels are unaffected and the response stays inside the 1 s budget. During the nightly sizing maintenance window the breaker is opened in advance, so users see the same behaviour without waiting for failures.</p>
+
+<h3>3.2 Sequence 2: the engineer raises the motor load and the drive is re-sized</h3>
+<p><strong>Goal:</strong> the drive moves to a larger frame, the 3D model swaps, and the BOM and price update, all consistently.</p>
+<table>
+  <tr><th style="width:4%">#</th><th style="width:20%">Component</th><th>What happens</th></tr>
+  <tr><td>1</td><td>Browser → WAF → Integration API</td><td>The engineer raises the motor from 75 kW to 90 kW in the sizing panel. <code>POST /api/items/DRV-03/resize</code> with the new motor data, an <code>Idempotency-Key</code> and <code>If-Match: 7</code>.</td></tr>
+  <tr><td>2</td><td>Integration API</td><td>Verifies the token, checks that the user may edit this project, and checks the idempotency key (a repeated click returns the first result instead of applying twice). If the sizing breaker is open, it returns <code>503 "sizing unavailable"</code> and nothing changes.</td></tr>
+  <tr><td>3</td><td>Integration API: sizing read order</td><td>&#9312; Redis <code>size:{hash(inputs, apiVersion)}</code>: miss. &#9313; PostgreSQL sizing results for that hash: miss. &#9314; The sizing adapter queues an interactive job whose ID is the input hash, so identical requests merge.</td></tr>
+  <tr><td>4</td><td>Worker (interactive) → Sizing tool</td><td>The worker takes a token from the sizing rate limit in Redis, uses the user's OBO token and calls the sizing tool (1 to 6 s). The response is validated against its schema: recommended <code>ACS-R8-90-400</code> (frame R8), 88 % load. &#9315; The result is stored in PostgreSQL and Redis.</td></tr>
+  <tr><td>5</td><td>Integration API</td><td>The API waits a short time (about 1.5 s) for the job. If the result is ready, it continues in the same request. Otherwise it returns <code>202 pending</code> and the next steps finish on the server, with the outcome pushed over SSE.</td></tr>
+  <tr><td>6</td><td>PostgreSQL (one transaction)</td><td>R8 differs from R7, so one transaction updates the item's variant and 3D model reference, its BOM line, sets version 8 and writes an outbox row. All of it is saved or none of it is. The <code>item_id</code> stays DRV-03.</td></tr>
+  <tr><td>7</td><td>Pricing</td><td>The entitlement check passes. Price for R8 in DE / G1 follows the read order (Redis, PostgreSQL snapshot, ERP) → <code>ok</code> or <code>pending</code>.</td></tr>
+  <tr><td>8</td><td>Integration API → Browser</td><td>The response (or an <code>item.updated</code> SSE event) carries the new variant, signed URLs for the R8 model, the BOM change (R7 removed, R8 added) and the price difference.</td></tr>
+  <tr><td>9</td><td>Browser → Blob storage</td><td>The browser loads the R8 glTF model through the CDN, lowest detail first, and swaps it into the scene. It re-runs the layout rules: a larger frame may now break a clearance rule and turn red. The BOM and price panels update.</td></tr>
+  <tr><td>10</td><td>Worker (interactive) → Host project API</td><td>The worker claims the outbox row and saves the change to the host with <code>If-Match</code> and an idempotency key. On a conflict it reloads from the host and tells the user. The host's webhook for this change carries version 8, already applied, so it is ignored.</td></tr>
+</table>
+<p><strong>If the variant does not change:</strong> only the sizing result is stored; no item, BOM or host write happens and the response says <code>changed: false</code>.</p>
+
+<h3>3.3 Sequence 3: "What will this layout cost, and which item has the longest lead time?"</h3>
+<p><strong>Goal:</strong> a correct answer for a user who may see prices, and a safe answer for one who may not, from the same flow.</p>
+<table>
+  <tr><th style="width:4%">#</th><th style="width:20%">Component</th><th>What happens</th></tr>
+  <tr><td>1</td><td>Browser → WAF → Integration API</td><td><code>POST /api/assistant/messages</code> with the question and the Bearer token. The API verifies the token and forwards the question and caller context to the Assistant container.</td></tr>
+  <tr><td>2</td><td>Orchestrator</td><td>Routes the question to the BOM agent and loads the conversation memory from PostgreSQL.</td></tr>
+  <tr><td>3</td><td>BOM agent + Private LLM</td><td>The model chooses two read tools: <code>get_bom_cost(projectId)</code> and <code>get_lead_times(projectId)</code>. Reads need no confirmation.</td></tr>
+  <tr><td>4</td><td>Tool registry → Integration API</td><td>Both tools call the same project and pricing services as the sidebar, as this user, through the same entitlement check. Prices come mostly from Redis and PostgreSQL snapshots, because the scheduled worker prefetched them when the project was opened; misses go to the ERP at low priority within its rate limit.</td></tr>
+</table>
+<p>From step 5 the two users differ:</p>
+<table>
+  <tr><th style="width:4%">#</th><th style="width:48%">Sales engineer (may see prices)</th><th>Channel partner (may not see prices)</th></tr>
+  <tr><td>5</td><td>Tools return every BOM line with price (DE, group G1), totals, quote validity and lead times.</td><td>The entitlement check denies prices before any cache or ERP call. Tools return the items with <code>pricing: "not_permitted"</code> and no price or lead-time fields at all. The model never receives a price, so no prompt can extract one.</td></tr>
+  <tr><td>6</td><td>The model drafts: <em>"Estimated total €184,300 (prices valid until 22 Oct 14:02). Longest lead time: DRV-03, frame R8, 12 weeks."</em> Any stale or pending price is stated as such, never guessed.</td><td>The model drafts: <em>"Pricing and lead times are not available for your role. The layout has 6 items; your sales contact can provide a quote."</em></td></tr>
+  <tr><td>7</td><td>The validator confirms that every figure comes from a tool result and that this user may see prices.</td><td>The validator confirms the answer contains no price, currency amount or lead time. If it did, the answer would go back to the agent with a critique.</td></tr>
+  <tr><td>8</td><td colspan="2">The answer is streamed to the browser over SSE. The question, both tool calls, the entitlement decisions (including denials) and the answer are written to the audit log.</td></tr>
+</table>
+<p><strong>Note:</strong> lead time is treated as commercially sensitive and follows price visibility. This is an assumption and a per-field policy setting, so it can be changed without code.</p>
+
+<h2>4. Assumptions</h2>
+<ol>
+  <li><strong>Identity:</strong> Microsoft Entra ID is the identity provider. It authenticates users and issues the claims used for authorisation (role, country and customer group). The Integration API makes every authorisation decision from those claims, on the server.</li>
+  <li><strong>Rate limits:</strong> the vendors' rate limits (sizing 20 requests per second, pricing 5 requests per second) apply to our whole service, not to each user. All API replicas and workers therefore share one set of counters in Redis.</li>
+  <li><strong>Cache lifetimes:</strong> a sizing result depends only on its inputs and the sizing API version, so it is cached and reused for 7 days. A price is cached for as long as its quote is valid (24 hours) and is never served after the quote expires.</li>
+  <li><strong>Stale data:</strong> when an external system is down or unreachable, users prefer to see the last known data, clearly marked as stale with its age, rather than an empty panel.</li>
+  <li><strong>Re-sizing:</strong> a re-size updates the existing item's variant and its stored sizing result. The item keeps its identity (<code>item_id</code>); it is never replaced by a new item.</li>
+</ol>
+
+</body>
+</html>

@@ -57,6 +57,18 @@ describe("ResizeService", () => {
     await expect(repos.items.findById("DRV-03")).resolves.toMatchObject({ variantCode: "ACS-R6-400", version: 1 });
   });
 
+  it("never re-sizes from a stale sizing result", async () => {
+    adapters.sizing.fetch.mockResolvedValueOnce({
+      status: "stale",
+      data: { variantCode: "ACS-R7-400", loadPct: 80 },
+      fetchedAt: "2026-10-01T00:00:00.000Z",
+      reason: "circuit_open",
+    });
+
+    await expect(service.resize("DRV-03", { motorKw: 70, voltage: 400 })).rejects.toMatchObject({ status: 503 });
+    await expect(repos.items.findById("DRV-03")).resolves.toMatchObject({ variantCode: "ACS-R6-400", version: 1 });
+  });
+
   it("returns 503 and changes nothing when the catalogue has no data for the new variant", async () => {
     adapters.catalogue.fetch.mockResolvedValueOnce({ status: "unavailable", data: null, reason: "timeout" });
 

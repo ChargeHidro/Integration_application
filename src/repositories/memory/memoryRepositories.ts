@@ -9,6 +9,8 @@ import type {
   Repositories,
   ResizeChange,
   ResizeOutcome,
+  SnapshotRepository,
+  Stored,
 } from "../types";
 
 interface MemoryState {
@@ -46,7 +48,31 @@ export function createMemoryRepositories(projects: SampleProject[] = [sampleProj
     }
   }
 
-  return { items: new MemoryItemRepository(state), bom: new MemoryBomRepository(state) };
+  return {
+    items: new MemoryItemRepository(state),
+    bom: new MemoryBomRepository(state),
+    catalogueVariants: new MemorySnapshotRepository((query) => query.variantCode),
+    sizingResults: new MemorySnapshotRepository((key) => `${key.inputHash}:${key.apiVersion}`),
+    priceSnapshots: new MemorySnapshotRepository((query) => `${query.variantCode}:${query.country}:${query.customerGroup}`),
+  };
+}
+
+class MemorySnapshotRepository<K, T> implements SnapshotRepository<K, T> {
+  private readonly rows = new Map<string, Stored<T>>();
+
+  constructor(private readonly keyOf: (key: K) => string) {}
+
+  async get(key: K): Promise<Stored<T> | null> {
+    const row = this.rows.get(this.keyOf(key));
+    return row ? structuredClone(row) : null;
+  }
+
+  async put(key: K, value: T, fetchedAt: string): Promise<void> {
+    const id = this.keyOf(key);
+    const existing = this.rows.get(id);
+    if (existing && Date.parse(existing.fetchedAt) > Date.parse(fetchedAt)) return;
+    this.rows.set(id, structuredClone({ value, fetchedAt }));
+  }
 }
 
 class MemoryItemRepository implements ItemRepository {
